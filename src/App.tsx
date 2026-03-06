@@ -1,13 +1,13 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   Camera, RefreshCw, Sparkles, Monitor, Wand2, Download,
-  Copy, Pen, Highlighter, ArrowRight, Type, Eraser, RotateCcw
+  Copy, Pen, Highlighter, ArrowRight, Type, Eraser, RotateCcw, Droplet, Undo2
 } from 'lucide-react';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 interface Selection { x: number; y: number; w: number; h: number }
 interface Capture { id: string; dataUrl: string; dims: string }
-type AnnotTool = 'pen' | 'highlight' | 'arrow' | 'text' | 'eraser' | null;
+type AnnotTool = 'pen' | 'highlight' | 'arrow' | 'text' | 'eraser' | 'blur' | null;
 type ImageFormat = 'webp' | 'png' | 'jpeg';
 
 const App: React.FC = () => {
@@ -27,10 +27,13 @@ const App: React.FC = () => {
   const [annotTool, setAnnotTool] = useState<AnnotTool>(null);
   const [annotColor, setAnnotColor] = useState('#FF3B30');
   const [annotSize, setAnnotSize] = useState(3);
+  const [isFlashing, setIsFlashing] = useState(false);
+  const [annotHistory, setAnnotHistory] = useState<ImageData[]>([]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const selCanvasRef = useRef<HTMLCanvasElement>(null);
   const annotCanvasRef = useRef<HTMLCanvasElement>(null);
+  const magnifierCanvasRef = useRef<HTMLCanvasElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isDraggingRef = useRef(false);
@@ -77,18 +80,24 @@ const App: React.FC = () => {
     selCanvasRef.current?.getContext('2d')?.clearRect(0, 0, 9999, 9999);
   }, [stopStream]);
 
+  const undoAnnotation = useCallback(() => {
+    setAnnotHistory(prev => {
+      if (prev.length === 0) return prev;
+      const newHist = [...prev];
+      newHist.pop();
+      const c = annotCanvasRef.current;
+      if (c) {
+        const ctx = c.getContext('2d')!;
+        if (newHist.length > 0) ctx.putImageData(newHist[newHist.length - 1], 0, 0);
+        else ctx.clearRect(0, 0, c.width, c.height);
+      }
+      return newHist;
+    });
+  }, []);
+
   const recapture = () => { setLiveDims(null); setAnnotTool(null); setTimeout(startStream, 80); };
 
-  // ─── Keyboard shortcuts ──────────────────────────────────
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') resetApp();
-      if ((e.ctrlKey || e.metaKey) && e.key === 'd') { e.preventDefault(); downloadImage(); }
-      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && view === 'result') { e.preventDefault(); copyToClipboard(); }
-    };
-    window.addEventListener('keydown', h);
-    return () => window.removeEventListener('keydown', h);
-  }, [view, imageCaptured, resetApp]); // eslint-disable-line
+
 
   // ─── Selection drawing ───────────────────────────────────
   const drawRect = (sel: Selection) => {
@@ -110,22 +119,48 @@ const App: React.FC = () => {
       selectionRef.current = { x, y, w: fixedSize.w / (v.videoWidth / v.clientWidth), h: fixedSize.h / (v.videoHeight / v.clientHeight) };
       drawRect(selectionRef.current);
     } else selectionRef.current = { x, y, w: 0, h: 0 };
+
+    const magLens = document.getElementById('magnifier-lens');
+    if (magLens) magLens.style.display = 'flex';
   };
 
   const handleSelMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isDraggingRef.current || isLocked) return;
     const rect = selCanvasRef.current!.getBoundingClientRect();
     const v = videoRef.current!;
-    selectionRef.current.w = (e.clientX - rect.left) - selectionRef.current.x;
-    selectionRef.current.h = (e.clientY - rect.top) - selectionRef.current.y;
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    selectionRef.current.w = x - selectionRef.current.x;
+    selectionRef.current.h = y - selectionRef.current.y;
     drawRect(selectionRef.current);
     setLiveDims({
       w: Math.round(Math.abs(selectionRef.current.w) * (v.videoWidth / v.clientWidth)),
       h: Math.round(Math.abs(selectionRef.current.h) * (v.videoHeight / v.clientHeight))
     });
+
+    const magLens = document.getElementById('magnifier-lens');
+    if (magLens) {
+      magLens.style.left = `${e.clientX}px`;
+      magLens.style.top = `${e.clientY}px`;
+    }
+
+    const mag = magnifierCanvasRef.current;
+    if (mag) {
+      const cx = mag.getContext('2d')!;
+      cx.imageSmoothingEnabled = false;
+      const sx = v.videoWidth / v.clientWidth, sy = v.videoHeight / v.clientHeight;
+      cx.clearRect(0, 0, 120, 120);
+      cx.drawImage(v, x * sx - 30, y * sy - 30, 60, 60, 0, 0, 120, 120);
+    }
   };
 
-  const handleSelUp = () => { if (!isDraggingRef.current) return; isDraggingRef.current = false; setLiveDims(null); cropSelection(); };
+  const handleSelUp = () => {
+    if (!isDraggingRef.current) return;
+    isDraggingRef.current = false;
+    setLiveDims(null);
+    const magLens = document.getElementById('magnifier-lens');
+    if (magLens) magLens.style.display = 'none';
+    cropSelection();
+  };
 
   // ─── Crop ────────────────────────────────────────────────
   const cropSelection = () => {
@@ -142,6 +177,9 @@ const App: React.FC = () => {
     setHistory(prev => [{ id: Date.now().toString(), dataUrl, dims: `${cw}×${ch}` }, ...prev].slice(0, 5));
     setImageCaptured(dataUrl); setGeminiResponse(null); setAnnotTool(null); setView('result');
     setStatus(`Captura: ${cw}×${ch}px ✓`); stopStream();
+    setAnnotHistory([]);
+    setIsFlashing(true);
+    setTimeout(() => setIsFlashing(false), 400);
     setTimeout(() => {
       const ac = annotCanvasRef.current; const ws = workspaceRef.current;
       if (ac && ws) { ac.width = ws.clientWidth; ac.height = ws.clientHeight; }
@@ -182,8 +220,23 @@ const App: React.FC = () => {
     const ctx = getACtx()!;
     if (annotTool === 'pen' || annotTool === 'highlight') { ctx.lineTo(x, y); ctx.stroke(); }
     else if (annotTool === 'eraser') ctx.clearRect(x - annotSize * 5, y - annotSize * 5, annotSize * 10, annotSize * 10);
+    else if (annotTool === 'blur') {
+      const radius = annotSize * 6;
+      const resultImg = document.getElementById('result-img') as HTMLImageElement;
+      if (!resultImg) return;
+      const scaleX = resultImg.naturalWidth / annotCanvasRef.current!.width;
+      const scaleY = resultImg.naturalHeight / annotCanvasRef.current!.height;
+      const temp = document.createElement('canvas'); temp.width = radius * 2; temp.height = radius * 2;
+      const ttx = temp.getContext('2d')!;
+      ttx.drawImage(resultImg, (x - radius) * scaleX, (y - radius) * scaleY, radius * 2 * scaleX, radius * 2 * scaleY, 0, 0, radius * 2, radius * 2);
+      const pix = document.createElement('canvas'); pix.width = Math.max(1, radius * 2 / 8); pix.height = Math.max(1, radius * 2 / 8);
+      pix.getContext('2d')!.drawImage(temp, 0, 0, pix.width, pix.height);
+      ttx.imageSmoothingEnabled = false;
+      ttx.drawImage(pix, 0, 0, pix.width, pix.height, 0, 0, temp.width, temp.height);
+      ctx.save(); ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.clip();
+      ctx.drawImage(temp, x - radius, y - radius); ctx.restore();
+    }
     else if (annotTool === 'arrow' && arrowStartRef.current) {
-      const cvs = annotCanvasRef.current!;
       ctx.putImageData(annotSnapshotRef.current!, 0, 0);
       const { x: fx, y: fy } = arrowStartRef.current;
       const hl = 15 + annotSize * 2, ang = Math.atan2(y - fy, x - fx);
@@ -198,23 +251,36 @@ const App: React.FC = () => {
     }
   };
 
-  const handleAnnotUp = () => { isAnnotatingRef.current = false; getACtx()?.closePath(); arrowStartRef.current = null; };
+  const handleAnnotUp = () => {
+    if (!isAnnotatingRef.current) return;
+    isAnnotatingRef.current = false; getACtx()?.closePath(); arrowStartRef.current = null;
+    const cvs = annotCanvasRef.current;
+    if (cvs) setAnnotHistory(prev => [...prev, cvs.getContext('2d')!.getImageData(0, 0, cvs.width, cvs.height)].slice(-20));
+  };
 
   const clearAnnotations = () => {
     const c = annotCanvasRef.current;
     if (c) c.getContext('2d')?.clearRect(0, 0, c.width, c.height);
+    setAnnotHistory([]);
   };
 
   // ─── Flatten image + annotations ─────────────────────────
   const getFlat = (): string => {
-    const ac = annotCanvasRef.current; if (!imageCaptured) return '';
+    const ac = annotCanvasRef.current;
+    const baseImg = document.getElementById('result-img') as HTMLImageElement;
+    if (!baseImg || !imageCaptured) return '';
+
     const flat = document.createElement('canvas');
-    flat.width = ac?.width || 800; flat.height = ac?.height || 600;
+    flat.width = baseImg.naturalWidth;
+    flat.height = baseImg.naturalHeight;
     const ctx = flat.getContext('2d')!;
-    const img = new Image(); img.src = imageCaptured;
-    ctx.drawImage(img, 0, 0, flat.width, flat.height);
-    if (ac) ctx.drawImage(ac, 0, 0);
-    return flat.toDataURL(`image/${format}`, quality);
+    ctx.imageSmoothingEnabled = false;
+
+    ctx.drawImage(baseImg, 0, 0);
+    if (ac) {
+      ctx.drawImage(ac, 0, 0, ac.width, ac.height, 0, 0, flat.width, flat.height);
+    }
+    return flat.toDataURL(format === 'jpeg' ? 'image/jpeg' : `image/${format}`, format === 'png' ? undefined : quality);
   };
 
   // ─── Actions ─────────────────────────────────────────────
@@ -255,9 +321,21 @@ const App: React.FC = () => {
         'Describe este recorte de pantalla en español. Si hay texto, extráelo. Identifica los elementos de UI relevantes.'
       ]);
       setGeminiResponse(res.response.text()); setStatus('Gemini completado ✓');
-    } catch (err: any) { setGeminiResponse(`Error: ${err.message}`); setStatus('Error con Gemini.'); }
+    } catch (err) { setGeminiResponse(`Error: ${err instanceof Error ? err.message : String(err)}`); setStatus('Error con Gemini.'); }
     setGeminiRunning(false);
   };
+
+  // ─── Keyboard shortcuts ──────────────────────────────────
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') resetApp();
+      if ((e.ctrlKey || e.metaKey) && e.key === 'd') { e.preventDefault(); downloadImage(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && view === 'result') { e.preventDefault(); copyToClipboard(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && view === 'result') { e.preventDefault(); undoAnnotation(); }
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [view, imageCaptured, resetApp, undoAnnotation]); // eslint-disable-line
 
   const annotCursor = annotTool === 'eraser' ? 'cell' : annotTool === 'text' ? 'text' : annotTool ? 'crosshair' : 'default';
 
@@ -284,9 +362,15 @@ const App: React.FC = () => {
             </div>
           )}
 
+          {isFlashing && <div className="shutter-flash" />}
+
           <video ref={videoRef} id="video-preview" autoPlay style={{ display: view === 'video' ? 'block' : 'none' }} />
           <canvas ref={selCanvasRef} id="selection-canvas" style={{ display: view === 'video' ? 'block' : 'none' }}
             onMouseDown={handleSelDown} onMouseMove={handleSelMove} onMouseUp={handleSelUp} />
+
+          <div id="magnifier-lens" className="magnifier-lens" style={{ display: 'none' }}>
+            <canvas ref={magnifierCanvasRef} width={120} height={120} />
+          </div>
 
           {view === 'result' && <>
             <img id="result-img" src={imageCaptured!} alt="Resultado" />
@@ -303,6 +387,7 @@ const App: React.FC = () => {
                 { t: 'highlight' as AnnotTool, icon: <Highlighter size={15} />, label: 'Resaltador' },
                 { t: 'arrow' as AnnotTool, icon: <ArrowRight size={15} />, label: 'Flecha' },
                 { t: 'text' as AnnotTool, icon: <Type size={15} />, label: 'Texto' },
+                { t: 'blur' as AnnotTool, icon: <Droplet size={15} />, label: 'Censurar/Desenfocar' },
                 { t: 'eraser' as AnnotTool, icon: <Eraser size={15} />, label: 'Borrar' },
               ]).map(({ t, icon, label }) => (
                 <button key={t!} title={label} className={`annot-btn ${annotTool === t ? 'active' : ''}`}
@@ -312,7 +397,8 @@ const App: React.FC = () => {
               <input type="color" value={annotColor} onChange={e => setAnnotColor(e.target.value)} className="color-picker" title="Color" />
               <input type="range" min={1} max={8} value={annotSize} onChange={e => setAnnotSize(+e.target.value)} className="size-slider" title="Tamaño" />
               <div className="annot-divider" />
-              <button className="annot-btn" title="Borrar anotaciones" onClick={clearAnnotations}><RotateCcw size={15} /></button>
+              <button className="annot-btn" title="Deshacer (Ctrl+Z)" onClick={undoAnnotation} disabled={annotHistory.length === 0}><Undo2 size={15} /></button>
+              <button className="annot-btn" title="Borrar todo" onClick={clearAnnotations}><RotateCcw size={15} /></button>
             </div>
           )}
         </div>
