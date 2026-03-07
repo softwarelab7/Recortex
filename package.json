@@ -12,10 +12,11 @@
     "deploy": "gh-pages -d dist"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
     "lucide-react": "^0.577.0",
+    "pdfjs-dist": "^5.5.207",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "vite-plugin-top-level-await": "^1.6.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

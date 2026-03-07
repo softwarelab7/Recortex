@@ -1,11 +1,11 @@
 :root {
-  --background: #000000;
-  --surface: #0a0a0a;
+  --background: #F2F2F7;
+  --surface: #FFFFFF;
   --primary: #007AFF;
   --accent: #5856D6;
-  --white: #ffffff;
-  --muted: #9CA3AF;
-  --border: rgba(255, 255, 255, 0.1);
+  --white: #1C1C1E;
+  --muted: #6E6E73;
+  --border: rgba(0, 0, 0, 0.1);
 }
 
 * {
@@ -16,7 +16,7 @@
 }
 
 body {
-  background: radial-gradient(circle at 80% 20%, #001A33 0%, #000000 60%);
+  background: radial-gradient(circle at 80% 20%, #D6E8FF 0%, #F2F2F7 60%);
   color: var(--white);
   height: 100vh;
   display: flex;
@@ -31,7 +31,7 @@ body {
 }
 
 .glass {
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(16px);
   border: 1px solid var(--border);
   border-radius: 16px;
@@ -71,7 +71,7 @@ header {
 }
 
 .shortcut-hint kbd {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.08);
   border-radius: 4px;
   padding: 1px 5px;
   font-family: monospace;
@@ -98,7 +98,7 @@ main {
   justify-content: center;
   border: 1px solid var(--border);
   overflow: hidden;
-  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.12);
 }
 
 .capture-prompt {
@@ -169,7 +169,7 @@ main {
   display: flex;
   align-items: center;
   gap: 4px;
-  background: rgba(8, 8, 12, 0.88);
+  background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(14px);
   border: 1px solid var(--border);
   border-radius: 50px;
@@ -192,8 +192,8 @@ main {
 }
 
 .annot-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: white;
+  background: rgba(0, 0, 0, 0.07);
+  color: var(--white);
 }
 
 .annot-btn.active {
@@ -279,12 +279,12 @@ h3 {
 }
 
 .btn-secondary {
-  background: var(--border);
-  color: white;
+  background: rgba(0, 0, 0, 0.07);
+  color: var(--white);
 }
 
 .btn-secondary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.13);
 }
 
 .btn-secondary:disabled {
@@ -295,11 +295,11 @@ h3 {
 /* ── Inputs ── */
 .api-input {
   width: 100%;
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.04);
   border: 1px solid var(--border);
   padding: 10px 12px;
   border-radius: 8px;
-  color: white;
+  color: var(--white);
   margin-bottom: 8px;
   font-size: 0.85rem;
 }
@@ -341,7 +341,7 @@ h3 {
   bottom: 0;
   left: 0;
   right: 0;
-  background: rgba(0, 0, 0, 0.75);
+  background: rgba(0, 0, 0, 0.55);
   font-size: 0.58rem;
   color: white;
   padding: 2px 3px;
@@ -394,7 +394,7 @@ footer {
   pointer-events: none;
   z-index: 1000;
   overflow: hidden;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.2) inset;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.08) inset;
   display: flex;
   align-items: center;
   justify-content: center;

@@ -1,9 +1,15 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
-  Camera, RefreshCw, Sparkles, Monitor, Wand2, Download,
+  Camera, RefreshCw, Sparkles, Monitor, Download, Upload,
   Copy, Pen, Highlighter, ArrowRight, Type, Eraser, RotateCcw, Droplet, Undo2
 } from 'lucide-react';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Configurar el worker de PDF.js explícitamente usando la URL del módulo
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.mjs',
+  import.meta.url
+).toString();
 
 interface Selection { x: number; y: number; w: number; h: number }
 interface Capture { id: string; dataUrl: string; dims: string }
@@ -19,10 +25,8 @@ const App: React.FC = () => {
   const [liveDims, setLiveDims] = useState<{ w: number; h: number } | null>(null);
   const [fileName, setFileName] = useState('Recorte_IA');
   const [format, setFormat] = useState<ImageFormat>('webp');
-  const [quality, setQuality] = useState(0.95);
-  const [apiKey, setApiKey] = useState('');
-  const [geminiRunning, setGeminiRunning] = useState(false);
-  const [geminiResponse, setGeminiResponse] = useState<string | null>(null);
+  const [quality, setQuality] = useState(1);
+
   const [history, setHistory] = useState<Capture[]>([]);
   const [annotTool, setAnnotTool] = useState<AnnotTool>(null);
   const [annotColor, setAnnotColor] = useState('#FF3B30');
@@ -30,51 +34,177 @@ const App: React.FC = () => {
   const [isFlashing, setIsFlashing] = useState(false);
   const [annotHistory, setAnnotHistory] = useState<ImageData[]>([]);
 
+  // PDF specific state
+  const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
+  const [pdfPage, setPdfPage] = useState<number>(1);
+
   const videoRef = useRef<HTMLVideoElement>(null);
+  const staticCanvasRef = useRef<HTMLCanvasElement>(null);
   const selCanvasRef = useRef<HTMLCanvasElement>(null);
   const annotCanvasRef = useRef<HTMLCanvasElement>(null);
   const magnifierCanvasRef = useRef<HTMLCanvasElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const isDraggingRef = useRef(false);
   const selectionRef = useRef<Selection>({ x: 0, y: 0, w: 0, h: 0 });
   const isAnnotatingRef = useRef(false);
   const annotSnapshotRef = useRef<ImageData | null>(null);
   const arrowStartRef = useRef<{ x: number; y: number } | null>(null);
+  const rafRef = useRef<number | null>(null);
 
-  // ─── Stream ──────────────────────────────────────────────
+  // ─── Renderizing Static Frame ──────────────────────────────
+  const setupStaticCanvas = (width: number, height: number, drawInitialFn: (ctx: CanvasRenderingContext2D) => void) => {
+    const sc = staticCanvasRef.current!;
+    const ws = workspaceRef.current!;
+    const cvs = selCanvasRef.current!;
+
+    sc.width = width;
+    sc.height = height;
+    const ctx = sc.getContext('2d')!;
+    drawInitialFn(ctx);
+
+    const scale = Math.min(ws.clientWidth / width, ws.clientHeight / height);
+    const displayW = Math.floor(width * scale);
+    const displayH = Math.floor(height * scale);
+
+    sc.style.display = 'block';
+    sc.style.width = `${displayW}px`;
+    sc.style.height = `${displayH}px`;
+
+    cvs.width = displayW;
+    cvs.height = displayH;
+    cvs.style.width = `${displayW}px`;
+    cvs.style.height = `${displayH}px`;
+
+    setStatus(`${width}×${height}px — Arrastra para seleccionar sobre la imagen congelada.`);
+    setView('video');
+  };
+
+  const renderPdfPage = async (pageNum: number, doc: pdfjsLib.PDFDocumentProxy) => {
+    setStatus(`Renderizando página ${pageNum}...`);
+    try {
+      const page = await doc.getPage(pageNum);
+      // Renderizar a 2.5x la resolución original para mayor calidad de recorte
+      const viewport = page.getViewport({ scale: 2.5 });
+
+      setupStaticCanvas(viewport.width, viewport.height, () => { }); // Prepara canvas vacío
+
+      const renderContext = {
+        canvasContext: staticCanvasRef.current!.getContext('2d')!,
+        viewport: viewport,
+        canvasFactory: {
+          create: (width: number, height: number) => {
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            return canvas;
+          },
+          reset: (canvasAndContext: any, width: number, height: number) => {
+            canvasAndContext.canvas.width = width;
+            canvasAndContext.canvas.height = height;
+          },
+          destroy: (canvasAndContext: any) => {
+            canvasAndContext.canvas.width = 0;
+            canvasAndContext.canvas.height = 0;
+            canvasAndContext.canvas = null;
+            canvasAndContext.context = null;
+          }
+        }
+      } as any;
+
+      await page.render(renderContext).promise;
+      setStatus(`Página ${pageNum} de ${doc.numPages}. Arrastra para recortar.`);
+    } catch (err) {
+      setStatus(`Error renderizando página ${pageNum}.`);
+    }
+  };
+
   const startStream = async () => {
     try {
       const ms = await navigator.mediaDevices.getDisplayMedia({
-        video: { width: { ideal: 7680 }, height: { ideal: 4320 }, frameRate: { ideal: 30 } }
+        video: { width: { ideal: 7680 }, height: { ideal: 4320 }, frameRate: { ideal: 30 } },
+        // @ts-ignore: standard prop in newer browsers to keep focus
+        surfaceSwitching: 'exclude',
       });
-      streamRef.current = ms;
-      if (videoRef.current) {
-        videoRef.current.srcObject = ms;
-        videoRef.current.onloadedmetadata = () => {
-          const v = videoRef.current!;
-          const ws = workspaceRef.current!;
-          const cvs = selCanvasRef.current!;
-          cvs.width = ws.clientWidth;
-          cvs.height = ws.clientHeight;
-          setStatus(`${v.videoWidth}×${v.videoHeight}px — Arrastra para seleccionar.`);
+
+      const v = videoRef.current!;
+      v.srcObject = ms;
+
+      v.onloadedmetadata = () => {
+        v.play();
+        requestAnimationFrame(() => {
+          setTimeout(() => {
+            setupStaticCanvas(v.videoWidth, v.videoHeight, (ctx) => ctx.drawImage(v, 0, 0));
+            ms.getTracks().forEach(t => t.stop());
+            v.srcObject = null;
+          }, 100);
+        });
+      };
+    } catch {
+      setStatus('No se pudo iniciar la captura.');
+    }
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.type === 'application/pdf') {
+      setStatus('Cargando PDF...');
+      const reader = new FileReader();
+      reader.onload = async (ev) => {
+        try {
+          const typedarray = new Uint8Array(ev.target?.result as ArrayBuffer);
+          const pdf = await pdfjsLib.getDocument(typedarray).promise;
+          setPdfDoc(pdf);
+          setPdfPage(1);
+          await renderPdfPage(1, pdf);
+          setStatus(`PDF cargado. Página 1 de ${pdf.numPages}. Arrastra para recortar.`);
+        } catch (err) {
+          setStatus('Error al leer el PDF.');
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } else if (file.type.startsWith('image/')) {
+      setStatus('Cargando imagen...');
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const img = new Image();
+        img.onload = () => {
+          setupStaticCanvas(img.width, img.height, (ctx) => ctx.drawImage(img, 0, 0));
+          setStatus('Imagen cargada. Arrastra para recortar.');
         };
-      }
-      setView('video');
-    } catch { setStatus('No se pudo iniciar la captura.'); }
+        img.src = ev.target?.result as string;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // Resetear input para permitir cargar el mismo archivo
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const clearAnnotations = () => {
+    const c = annotCanvasRef.current;
+    if (c) c.getContext('2d')?.clearRect(0, 0, c.width, c.height);
+    setAnnotHistory([]);
   };
 
   const stopStream = useCallback(() => {
-    streamRef.current?.getTracks().forEach(t => t.stop());
-    streamRef.current = null;
-  }, []);
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setView('welcome'); imageCaptured && URL.revokeObjectURL(imageCaptured); setImageCaptured(null);
+    clearAnnotations();
+    setPdfDoc(null);
+    setPdfPage(1);
+    setStatus('Listo para capturar.');
+  }, [imageCaptured]);
 
   const resetApp = useCallback(() => {
     stopStream();
     setView('welcome');
     setImageCaptured(null);
     setLiveDims(null);
-    setGeminiResponse(null);
     setAnnotTool(null);
     setStatus('Listo.');
     selCanvasRef.current?.getContext('2d')?.clearRect(0, 0, 9999, 9999);
@@ -115,8 +245,13 @@ const App: React.FC = () => {
     const x = e.clientX - rect.left, y = e.clientY - rect.top;
     isDraggingRef.current = true;
     if (isLocked && fixedSize) {
-      const v = videoRef.current!;
-      selectionRef.current = { x, y, w: fixedSize.w / (v.videoWidth / v.clientWidth), h: fixedSize.h / (v.videoHeight / v.clientHeight) };
+      const source = staticCanvasRef.current!;
+      const scale = rect.width / source.width;
+      selectionRef.current = {
+        x, y,
+        w: fixedSize.w * scale,
+        h: fixedSize.h * scale
+      };
       drawRect(selectionRef.current);
     } else selectionRef.current = { x, y, w: 0, h: 0 };
 
@@ -126,36 +261,54 @@ const App: React.FC = () => {
 
   const handleSelMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isDraggingRef.current || isLocked) return;
+
     const rect = selCanvasRef.current!.getBoundingClientRect();
-    const v = videoRef.current!;
-    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // Solo actualizar las referencias mutables sincrónicamente
     selectionRef.current.w = x - selectionRef.current.x;
     selectionRef.current.h = y - selectionRef.current.y;
-    drawRect(selectionRef.current);
-    setLiveDims({
-      w: Math.round(Math.abs(selectionRef.current.w) * (v.videoWidth / v.clientWidth)),
-      h: Math.round(Math.abs(selectionRef.current.h) * (v.videoHeight / v.clientHeight))
+
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+
+    rafRef.current = requestAnimationFrame(() => {
+      drawRect(selectionRef.current);
+
+      const source = staticCanvasRef.current!;
+      if (source && source.width) {
+        // La escala ya es directa entre los píxeles lógicos del CSS y los internos de la imagen
+        const scale = rect.width / source.width;
+
+        setLiveDims({
+          w: Math.round(Math.abs(selectionRef.current.w) / scale),
+          h: Math.round(Math.abs(selectionRef.current.h) / scale)
+        });
+
+        const magLens = document.getElementById('magnifier-lens');
+        if (magLens) {
+          magLens.style.left = `${e.clientX}px`;
+          magLens.style.top = `${e.clientY}px`;
+        }
+
+        const mag = magnifierCanvasRef.current;
+        if (mag) {
+          const cx = mag.getContext('2d', { alpha: false, willReadFrequently: true })!;
+          cx.imageSmoothingEnabled = false;
+          // Coordenadas exactas en la imagen fuente original
+          const ix = x / scale;
+          const iy = y / scale;
+          // Capture 60x60 intrinsic pixels centered around cursor
+          cx.drawImage(source, ix - 30, iy - 30, 60, 60, 0, 0, 120, 120);
+        }
+      }
     });
-
-    const magLens = document.getElementById('magnifier-lens');
-    if (magLens) {
-      magLens.style.left = `${e.clientX}px`;
-      magLens.style.top = `${e.clientY}px`;
-    }
-
-    const mag = magnifierCanvasRef.current;
-    if (mag) {
-      const cx = mag.getContext('2d')!;
-      cx.imageSmoothingEnabled = false;
-      const sx = v.videoWidth / v.clientWidth, sy = v.videoHeight / v.clientHeight;
-      cx.clearRect(0, 0, 120, 120);
-      cx.drawImage(v, x * sx - 30, y * sy - 30, 60, 60, 0, 0, 120, 120);
-    }
   };
 
   const handleSelUp = () => {
     if (!isDraggingRef.current) return;
     isDraggingRef.current = false;
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
     setLiveDims(null);
     const magLens = document.getElementById('magnifier-lens');
     if (magLens) magLens.style.display = 'none';
@@ -166,16 +319,41 @@ const App: React.FC = () => {
   const cropSelection = () => {
     const { x, y, w, h } = selectionRef.current;
     if (Math.abs(w) < 5 || Math.abs(h) < 5) return;
-    const v = videoRef.current!;
-    const sx = v.videoWidth / v.clientWidth, sy = v.videoHeight / v.clientHeight;
-    const cw = Math.round(Math.abs(w) * sx), ch = Math.round(Math.abs(h) * sy);
-    const ox = Math.round((w < 0 ? x + w : x) * sx), oy = Math.round((h < 0 ? y + h : y) * sy);
-    const off = document.createElement('canvas'); off.width = cw; off.height = ch;
-    const ctx = off.getContext('2d')!; ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(v, ox, oy, cw, ch, 0, 0, cw, ch);
+
+    const source = staticCanvasRef.current!;
+    const rect = selCanvasRef.current!.getBoundingClientRect();
+    const scale = rect.width / source.width;
+
+    const logicalW = Math.abs(w);
+    const logicalH = Math.abs(h);
+    const logicalX = w < 0 ? x + w : x;
+    const logicalY = h < 0 ? y + h : y;
+
+    // Convert screen coordinates to intrinsic image pixels directly
+    const ox = Math.round(logicalX / scale);
+    const oy = Math.round(logicalY / scale);
+    const cw = Math.round(logicalW / scale);
+    const ch = Math.round(logicalH / scale);
+
+    // Constrain crop to image bounds
+    const safeX = Math.max(0, ox);
+    const safeY = Math.max(0, oy);
+    const safeW = Math.min(source.width - safeX, cw);
+    const safeH = Math.min(source.height - safeY, ch);
+
+    if (safeW <= 0 || safeH <= 0) return;
+
+    const off = document.createElement('canvas');
+    off.width = safeW;
+    off.height = safeH;
+
+    const ctx = off.getContext('2d')!;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(source, safeX, safeY, safeW, safeH, 0, 0, safeW, safeH);
+
     const dataUrl = off.toDataURL(`image/${format}`, quality);
     setHistory(prev => [{ id: Date.now().toString(), dataUrl, dims: `${cw}×${ch}` }, ...prev].slice(0, 5));
-    setImageCaptured(dataUrl); setGeminiResponse(null); setAnnotTool(null); setView('result');
+    setImageCaptured(dataUrl); setAnnotTool(null); setView('result');
     setStatus(`Captura: ${cw}×${ch}px ✓`); stopStream();
     setAnnotHistory([]);
     setIsFlashing(true);
@@ -258,12 +436,6 @@ const App: React.FC = () => {
     if (cvs) setAnnotHistory(prev => [...prev, cvs.getContext('2d')!.getImageData(0, 0, cvs.width, cvs.height)].slice(-20));
   };
 
-  const clearAnnotations = () => {
-    const c = annotCanvasRef.current;
-    if (c) c.getContext('2d')?.clearRect(0, 0, c.width, c.height);
-    setAnnotHistory([]);
-  };
-
   // ─── Flatten image + annotations ─────────────────────────
   const getFlat = (): string => {
     const ac = annotCanvasRef.current;
@@ -307,42 +479,42 @@ const App: React.FC = () => {
     setStatus(`Descargado: ${a.download} ✓`);
   };
 
-  const runGemini = async () => {
-    if (!apiKey) { alert('Introduce tu clave API.'); return; }
-    if (!imageCaptured) return;
-    setGeminiRunning(true); setStatus('Consultando Gemini...');
-    try {
-      const genAI = new GoogleGenerativeAI(apiKey);
-      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-      const b64 = imageCaptured.split(',')[1];
-      const mime = imageCaptured.split(';')[0].split(':')[1] as 'image/webp' | 'image/png' | 'image/jpeg';
-      const res = await model.generateContent([
-        { inlineData: { data: b64, mimeType: mime } },
-        'Describe este recorte de pantalla en español. Si hay texto, extráelo. Identifica los elementos de UI relevantes.'
-      ]);
-      setGeminiResponse(res.response.text()); setStatus('Gemini completado ✓');
-    } catch (err) { setGeminiResponse(`Error: ${err instanceof Error ? err.message : String(err)}`); setStatus('Error con Gemini.'); }
-    setGeminiRunning(false);
-  };
 
-  // ─── Keyboard shortcuts ──────────────────────────────────
+
+  // ─── Keyboard shortcuts & PDF Navigation ──────────────────────────────────
+  const goPrevPage = useCallback(async () => {
+    if (pdfDoc && pdfPage > 1) {
+      const p = pdfPage - 1; setPdfPage(p); await renderPdfPage(p, pdfDoc);
+    }
+  }, [pdfDoc, pdfPage]);
+
+  const goNextPage = useCallback(async () => {
+    if (pdfDoc && pdfPage < pdfDoc.numPages) {
+      const p = pdfPage + 1; setPdfPage(p); await renderPdfPage(p, pdfDoc);
+    }
+  }, [pdfDoc, pdfPage]);
+
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
       if (e.key === 'Escape') resetApp();
       if ((e.ctrlKey || e.metaKey) && e.key === 'd') { e.preventDefault(); downloadImage(); }
       if ((e.ctrlKey || e.metaKey) && e.key === 'c' && view === 'result') { e.preventDefault(); copyToClipboard(); }
       if ((e.ctrlKey || e.metaKey) && e.key === 'z' && view === 'result') { e.preventDefault(); undoAnnotation(); }
+      if (view === 'video' && pdfDoc) {
+        if (e.key === 'ArrowLeft') goPrevPage();
+        if (e.key === 'ArrowRight') goNextPage();
+      }
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [view, imageCaptured, resetApp, undoAnnotation]); // eslint-disable-line
+  }, [view, imageCaptured, resetApp, undoAnnotation, pdfDoc, goPrevPage, goNextPage]); // eslint-disable-line
 
   const annotCursor = annotTool === 'eraser' ? 'cell' : annotTool === 'text' ? 'text' : annotTool ? 'crosshair' : 'default';
 
   return (
     <>
       <header>
-        <div className="logo"><Camera size={22} /> RECORTADOR <span>IA PRO</span></div>
+        <div className="logo"><Camera size={22} /> RECORTADOR <span>PRO</span></div>
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
           <span className="shortcut-hint"><kbd>Esc</kbd> reset · <kbd>Ctrl+D</kbd> descargar · <kbd>Ctrl+C</kbd> copiar</span>
           <button className="btn btn-secondary" onClick={resetApp}><RefreshCw size={15} /> Resetear</button>
@@ -355,18 +527,39 @@ const App: React.FC = () => {
             <div className="capture-prompt">
               <Sparkles size={60} />
               <h2>Elegancia y Precisión</h2>
-              <p>Captura cualquier ventana para empezar</p><br />
-              <button className="btn btn-primary" style={{ margin: '0 auto' }} onClick={startStream}>
-                <Monitor size={16} /> Seleccionar Pantalla
+              <p>Captura tu pantalla o carga un documento para empezar</p><br />
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+                <button className="btn btn-primary" style={{ width: 'auto' }} onClick={startStream}>
+                  <Monitor size={16} /> Seleccionar Pantalla
+                </button>
+                <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept="image/*,application/pdf" style={{ display: 'none' }} />
+                <button className="btn btn-secondary" style={{ width: 'auto' }} onClick={() => fileInputRef.current?.click()}>
+                  <Upload size={16} /> Cargar Archivo
+                </button>
+              </div>
+            </div>
+          )}
+
+          {view === 'video' && pdfDoc && (
+            <div style={{ position: 'absolute', top: 15, left: '50%', transform: 'translateX(-50%)', zIndex: 10, display: 'flex', gap: '8px', background: 'var(--surface)', padding: '8px 16px', borderRadius: '12px', boxShadow: 'var(--shadow)' }}>
+              <button className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '0.9rem', width: 'auto' }} disabled={pdfPage <= 1} onClick={goPrevPage}>
+                ◄ Anterior
+              </button>
+              <span style={{ margin: 'auto 6px', fontSize: '1rem', fontWeight: 600 }}>{pdfPage} / {pdfDoc.numPages}</span>
+              <button className="btn btn-secondary" style={{ padding: '6px 12px', fontSize: '0.9rem', width: 'auto' }} disabled={pdfPage >= pdfDoc.numPages} onClick={goNextPage}>
+                Siguiente ►
               </button>
             </div>
           )}
 
           {isFlashing && <div className="shutter-flash" />}
 
-          <video ref={videoRef} id="video-preview" autoPlay style={{ display: view === 'video' ? 'block' : 'none' }} />
-          <canvas ref={selCanvasRef} id="selection-canvas" style={{ display: view === 'video' ? 'block' : 'none' }}
-            onMouseDown={handleSelDown} onMouseMove={handleSelMove} onMouseUp={handleSelUp} />
+          <video ref={videoRef} style={{ display: 'none' }} muted playsInline />
+          <div style={{ position: 'relative', display: view === 'video' ? 'block' : 'none' }}>
+            <canvas ref={staticCanvasRef} id="static-preview" />
+            <canvas ref={selCanvasRef} id="selection-canvas"
+              onMouseDown={handleSelDown} onMouseMove={handleSelMove} onMouseUp={handleSelUp} />
+          </div>
 
           <div id="magnifier-lens" className="magnifier-lens" style={{ display: 'none' }}>
             <canvas ref={magnifierCanvasRef} width={120} height={120} />
@@ -406,10 +599,7 @@ const App: React.FC = () => {
         <aside className="sidebar">
           <div className="card glass">
             <h3>Acciones</h3>
-            <button className="btn btn-primary" onClick={runGemini} disabled={!imageCaptured || geminiRunning}>
-              <Wand2 size={15} /> {geminiRunning ? 'Analizando…' : 'Análisis Gemini'}
-            </button>
-            <button className="btn btn-secondary" style={{ marginTop: '8px' }} onClick={copyToClipboard} disabled={!imageCaptured}>
+            <button className="btn btn-secondary" style={{ marginTop: '0' }} onClick={copyToClipboard} disabled={!imageCaptured}>
               <Copy size={15} /> Copiar al portapapeles
             </button>
             {imageCaptured && (
@@ -468,7 +658,7 @@ const App: React.FC = () => {
               <div className="history-grid">
                 {history.map(cap => (
                   <div key={cap.id} className="history-thumb"
-                    onClick={() => { setImageCaptured(cap.dataUrl); setView('result'); setGeminiResponse(null); setAnnotTool(null); }}>
+                    onClick={() => { setImageCaptured(cap.dataUrl); setView('result'); setAnnotTool(null); }}>
                     <img src={cap.dataUrl} alt={cap.dims} />
                     <span>{cap.dims}</span>
                   </div>
@@ -477,29 +667,13 @@ const App: React.FC = () => {
             </div>
           )}
 
-          <div className="card glass">
-            <h3>Configuración</h3>
-            <p style={{ fontSize: '0.8rem', marginBottom: '8px' }}>Clave Google AI Studio</p>
-            <input type="password" className="api-input" placeholder="Pega tu clave aquí…"
-              value={apiKey} onChange={e => setApiKey(e.target.value)} />
-            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer"
-              style={{ color: 'var(--primary)', fontSize: '0.75rem', textDecoration: 'none' }}>
-              ¿No tienes clave? Consíguela gratis →
-            </a>
-          </div>
 
-          {geminiResponse && (
-            <div className="card glass" style={{ borderColor: 'rgba(88,86,214,0.5)' }}>
-              <h3 style={{ color: 'var(--accent)' }}>Resultado IA ✦</h3>
-              <p style={{ fontSize: '0.82rem', lineHeight: 1.7, color: 'var(--muted)', whiteSpace: 'pre-wrap' }}>{geminiResponse}</p>
-            </div>
-          )}
         </aside>
       </main>
 
       <footer>
         <div>{status}</div>
-        <div>v3.0 · React + Gemini</div>
+        <div>v3.0 · React</div>
       </footer>
     </>
   );
