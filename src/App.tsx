@@ -193,22 +193,20 @@ const App: React.FC = () => {
   const stopStream = useCallback(() => {
     if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
     if (videoRef.current) videoRef.current.srcObject = null;
-    setView('welcome'); imageCaptured && URL.revokeObjectURL(imageCaptured); setImageCaptured(null);
-    clearAnnotations();
     setPdfDoc(null);
     setPdfPage(1);
-    setStatus('Listo para capturar.');
-  }, [imageCaptured]);
+  }, []);
 
   const resetApp = useCallback(() => {
     stopStream();
     setView('welcome');
-    setImageCaptured(null);
+    if (imageCaptured) { URL.revokeObjectURL(imageCaptured); setImageCaptured(null); }
     setLiveDims(null);
     setAnnotTool(null);
-    setStatus('Listo.');
+    clearAnnotations();
+    setStatus('Listo para capturar.');
     selCanvasRef.current?.getContext('2d')?.clearRect(0, 0, 9999, 9999);
-  }, [stopStream]);
+  }, [stopStream, imageCaptured]);
 
   const undoAnnotation = useCallback(() => {
     setAnnotHistory(prev => {
