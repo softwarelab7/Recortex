@@ -352,7 +352,7 @@ const App: React.FC = () => {
     const dataUrl = off.toDataURL(`image/${format}`, quality);
     setHistory(prev => [{ id: Date.now().toString(), dataUrl, dims: `${cw}×${ch}` }, ...prev].slice(0, 5));
     setImageCaptured(dataUrl); setAnnotTool(null); setView('result');
-    setStatus(`Captura: ${cw}×${ch}px ✓`); stopStream();
+    setStatus(`Captura: ${cw}×${ch}px ✓`);
     setAnnotHistory([]);
     setIsFlashing(true);
     setTimeout(() => setIsFlashing(false), 400);
